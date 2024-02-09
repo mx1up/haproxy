@@ -28,6 +28,7 @@
 
 #include <haproxy/applet.h>
 #include <haproxy/base64.h>
+#include <haproxy/cfgparse.h>
 #include <haproxy/channel.h>
 #include <haproxy/cli.h>
 #include <haproxy/errors.h>
@@ -3966,3 +3967,80 @@ static struct cli_kw_list cli_kws = {{ },{
 
 INITCALL1(STG_REGISTER, cli_register_kw, &cli_kws);
 
+/*
+ * Parse "crt-store" section and create corresponding ckch_stores.
+ *
+ * The function returns 0 in success case, otherwise, it returns error
+ * flags.
+ */
+static int cfg_parse_crtstore(const char *file, int linenum, char **args, int kwm)
+{
+	struct cfg_kw_list *kwl;
+	const char *best;
+	int index;
+	int rc = 0;
+	int err_code = 0;
+	char *errmsg = NULL;
+
+	if (strcmp(args[0], "crt-store") == 0) { /* new crt-store section */
+		if (*args[1]) {
+			ha_alert("parsing [%s:%d] : 'crt-store' section does not support an argument.\n", file, linenum);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		goto out;
+	}
+
+	list_for_each_entry(kwl, &cfg_keywords.list, list) {
+		for (index = 0; kwl->kw[index].kw != NULL; index++) {
+			if (kwl->kw[index].section != CFG_CRTSTORE)
+				continue;
+			if (strcmp(kwl->kw[index].kw, args[0]) == 0) {
+				if (check_kw_experimental(&kwl->kw[index], file, linenum, &errmsg)) {
+					ha_alert("%s\n", errmsg);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+
+				/* prepare error message just in case */
+				rc = kwl->kw[index].parse(args, CFG_CRTSTORE, NULL, NULL, file, linenum, &errmsg);
+				if (rc & ERR_ALERT) {
+					ha_alert("parsing [%s:%d] : %s\n", file, linenum, errmsg);
+					err_code |= rc;
+					goto out;
+				}
+				else if (rc & ERR_WARN) {
+					ha_warning("parsing [%s:%d] : %s\n", file, linenum, errmsg);
+					err_code |= rc;
+					goto out;
+				}
+				goto out;
+			}
+		}
+	}
+
+	best = cfg_find_best_match(args[0], &cfg_keywords.list, CFG_CRTSTORE, NULL);
+	if (best)
+		ha_alert("parsing [%s:%d] : unknown keyword '%s' in '%s' section; did you mean '%s' maybe ?\n", file, linenum, args[0], cursection, best);
+	else
+		ha_alert("parsing [%s:%d] : unknown keyword '%s' in '%s' section\n", file, linenum, args[0], cursection);
+	err_code |= ERR_ALERT | ERR_FATAL;
+	goto out;
+
+out:
+	free(errmsg);
+	return err_code;
+
+alloc_error:
+	ha_alert("parsing [%s:%d]: out of memory.\n", file, linenum);
+	err_code |= ERR_ALERT | ERR_ABORT;
+	goto out;
+
+}
+
+REGISTER_CONFIG_SECTION("crt-store", cfg_parse_crtstore, NULL);
+
+static struct cfg_kw_list cfg_kws = {ILH, {
+	{ 0, NULL, NULL },
+}};
+INITCALL1(STG_REGISTER, cfg_register_keywords, &cfg_kws);
