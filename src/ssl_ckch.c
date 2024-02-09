@@ -3967,6 +3967,140 @@ static struct cli_kw_list cli_kws = {{ },{
 
 INITCALL1(STG_REGISTER, cli_register_kw, &cli_kws);
 
+/* crt-store does not try to find files, but use the stored filename */
+static int ckch_store_load_files(struct ckch_filenames *f, struct ckch_store *c, char **err)
+{
+	int i;
+	int err_code = 0;
+	int rc = 0;
+	struct ckch_data *d = c->data;
+
+	struct {
+		const char *type;
+		char *filename;
+		int (*func)(const char *path, char *buf, struct ckch_data *d, char **err);
+	} file_funcs[] = {
+		{ "crt",    f->crt,    ssl_sock_load_pem_into_ckch },
+		{ "key",    f->key,    ssl_sock_load_key_into_ckch },
+		{ "ocsp",   f->ocsp,   ssl_sock_load_ocsp_response_from_file },
+		{ "issuer", f->issuer, ssl_sock_load_issuer_file_into_ckch },
+		{ "sctl",   f->sctl,   ssl_sock_load_sctl_from_file },
+		{ NULL,     NULL,      NULL }
+	};
+
+	/* crt */
+	if (!f->crt) {
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
+	}
+
+	for (i = 0; file_funcs[i].type; i++) {
+		if (file_funcs[i].filename) {
+			rc = file_funcs[i].func(file_funcs[i].filename, NULL, d, err);
+			if (rc) {
+				err_code |= ERR_ALERT | ERR_FATAL;
+				memprintf(err, "%s '%s' cannot be read or parsed.",
+				          err && *err ? *err : "", file_funcs[i].filename);
+				goto out;
+			}
+		}
+	}
+out:
+	if (err_code & ERR_FATAL)
+		ssl_sock_free_cert_key_and_chain_contents(d);
+	ERR_clear_error();
+
+	return err_code;
+}
+
+static int crtstore_parse_load(char **args, int section_type, struct proxy *curpx, const struct proxy *defpx,
+                        const char *file, int linenum, char **err)
+{
+	int i;
+	int err_code = 0;
+	int cur_arg = 0;
+	char *name;
+	struct ckch_filenames f = {};
+	struct ckch_store *c = NULL;
+
+	struct {
+		const char *name;
+		char **target;
+	} crt_kws[] = {
+		{ "crt",    &f.crt },
+		{ "key",    &f.key },
+		{ "ocsp",   &f.ocsp },
+		{ "issuer", &f.issuer },
+		{ "sctl",   &f.sctl },
+		{ "name",   &f.name },
+		{ NULL,     NULL }
+	};
+
+	cur_arg++; /* skip "load" */
+
+	while (*(args[cur_arg])) {
+		int found = 0;
+
+		for (i = 0; crt_kws[i].name != NULL; i++) {
+			if (strcmp(crt_kws[i].name, args[cur_arg]) == 0) {
+				found = 1;
+				*crt_kws[i].target = strdup(args[cur_arg + 1]);
+				if (!*crt_kws[i].target)
+					goto alloc_error;
+				break;
+			}
+
+		}
+		if (!found) {
+			memprintf(err,"parsing [%s:%d] : '%s %s' in section 'crt-store': unknown keyword '%s'.",
+			         file, linenum, args[0], args[cur_arg],args[cur_arg]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		cur_arg += 2;
+	}
+
+	if (!f.crt) {
+		memprintf(err,"parsing [%s:%d] : '%s' in section 'crt-store': mandatory 'crt' parameter not found.",
+		         file, linenum, args[0]);
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
+	}
+
+	name = f.name ? f.name : f.crt;
+
+	/* process and insert the ckch_store */
+	c = ckch_store_new(name);
+	if (!c)
+		goto alloc_error;
+
+	err_code |= ckch_store_load_files(&f, c, err);
+	if (err_code & ERR_FATAL)
+		goto out;
+
+	if (ebst_insert(&ckchs_tree, &c->node) != &c->node) {
+		memprintf(err,"parsing [%s:%d] : '%s' in section 'crt-store': store '%s' was already defined.",
+		         file, linenum, args[0], f.crt);
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
+	}
+
+out:
+	/* free ckch_filenames content */
+	for (i = 0; crt_kws[i].name != NULL; i++) {
+		free(*crt_kws[i].target);
+	}
+	if (err_code & ERR_FATAL) {
+		ckch_store_free(c);
+	}
+	return err_code;
+
+alloc_error:
+	ha_alert("parsing [%s:%d]: out of memory.\n", file, linenum);
+	err_code |= ERR_ALERT | ERR_ABORT;
+	goto out;
+}
+
 /*
  * Parse "crt-store" section and create corresponding ckch_stores.
  *
@@ -4041,6 +4175,7 @@ alloc_error:
 REGISTER_CONFIG_SECTION("crt-store", cfg_parse_crtstore, NULL);
 
 static struct cfg_kw_list cfg_kws = {ILH, {
+	{ CFG_CRTSTORE, "load", crtstore_parse_load },
 	{ 0, NULL, NULL },
 }};
 INITCALL1(STG_REGISTER, cfg_register_keywords, &cfg_kws);

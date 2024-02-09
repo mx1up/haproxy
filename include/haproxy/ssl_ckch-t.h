@@ -58,6 +58,16 @@ struct ckch_data {
 	int ocsp_update_mode;
 };
 
+/* list of filename options for a "crt" */
+struct ckch_filenames {
+	char *name;
+	char *crt;
+	char *key;
+	char *ocsp;
+	char *issuer;
+	char *sctl;
+};
+
 /*
  * this is used to store 1 to SSL_SOCK_NUM_KEYTYPES cert_key_and_chain and
  * metadata.
